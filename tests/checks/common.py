@@ -61,12 +61,15 @@ def load_class(check_name, class_name):
     raise Exception(u"Unable to import class {0} from the check module.".format(class_name))
 
 
-def load_check(name, config, agentConfig):
-    checksd_path = get_checksd_path(get_os())
+def load_check(name, config, agentConfig, is_sdk=None):
+    if not is_sdk:
+        checksd_path = get_checksd_path(get_os())
 
-    # find (in checksd_path) and load the check module
-    fd, filename, desc = imp.find_module(name, [checksd_path])
-    check_module = imp.load_module(name, fd, filename, desc)
+        # find (in checksd_path) and load the check module
+        fd, filename, desc = imp.find_module(name, [checksd_path])
+        check_module = imp.load_module(name, fd, filename, desc)
+    else:
+        check_module = __import__("check.py")
 
     check_class = None
     classes = inspect.getmembers(check_module, inspect.isclass)
@@ -137,6 +140,9 @@ class AgentCheckTest(unittest.TestCase):
         if not hasattr(self, 'CHECK_NAME'):
             raise Exception("You must define CHECK_NAME")
 
+        if not hasattr(self, 'SDK'):
+            self.SDK = False
+
         self.check = None
 
     def is_travis(self):
@@ -144,7 +150,7 @@ class AgentCheckTest(unittest.TestCase):
 
     def load_check(self, config, agent_config=None):
         agent_config = agent_config or self.DEFAULT_AGENT_CONFIG
-        self.check = load_check(self.CHECK_NAME, config, agent_config)
+        self.check = load_check(self.CHECK_NAME, config, agent_config, is_sdk=self.SDK)
 
     def load_class(self, name):
         """
