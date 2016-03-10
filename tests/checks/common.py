@@ -69,7 +69,7 @@ def load_check(name, config, agentConfig, is_sdk=None):
         fd, filename, desc = imp.find_module(name, [checksd_path])
         check_module = imp.load_module(name, fd, filename, desc)
     else:
-        check_module = __import__("check.py")
+        check_module = __import__("check")
 
     check_class = None
     classes = inspect.getmembers(check_module, inspect.isclass)
