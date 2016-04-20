@@ -42,6 +42,19 @@ FUNC_MAP = {
     RATE: {True: HISTORATE, False: RATE}
 }
 
+BLACKLISTED_LABELS = set([
+    "io.kubernetes.pod.terminationGracePeriod",
+    "io.kubernetes.container.hash",
+    "io.kubernetes.container.restartCount",
+    "io.kubernetes.container.terminationMessagePath",
+    "io.kubernetes.pod.uid",
+
+    # Those below will be processed separately
+    "io.kubernetes.pod.name",
+    "io.kubernetes.pod.namespace",
+
+])
+
 
 class Kubernetes(AgentCheck):
     """ Collect metrics and events from kubelet """
@@ -157,6 +170,53 @@ class Kubernetes(AgentCheck):
         # shorten docker image id
         return re.sub('([0-9a-fA-F]{64,})', lambda x: x.group(1)[0:12], name)
 
+    def _get_post_1_2_tags(self, tags, cont_labels, subcontainer, kube_labels):
+
+        pod_name = cont_labels["io.kubernetes.pod.name"]
+        pod_namespace = cont_labels["io.kubernetes.pod.namespace"]
+        tags.append("pod_name:{0}".format(pod_name))
+        tags.append("kube_namespace:{0}".format(pod_namespace))
+
+        kube_labels_key = "{0}/{1}".format(pod_namespace, pod_name)
+        pod_labels = kube_labels.get(kube_labels_key)
+        if pod_labels:
+            tags.extend(list(pod_labels))
+
+        if "-" in pod_name:
+            replication_controller = "-".join(pod_name.split("-")[:-1])
+            tags.append("kube_replication_controller:%s" % replication_controller)
+
+        if self.publish_aliases and subcontainer.get("aliases"):
+            for alias in subcontainer['aliases'][1:]:
+                    # we don't add the first alias as it will be the container_name
+                    tags.append('container_alias:%s' % (self._shorten_name(alias)))
+
+        return tags
+
+    def _get_pre_1_2_tags(self, tags, cont_labels, subcontainer, kube_labels):
+
+        pod_name = cont_labels["io.kubernetes.pod.name"]
+        tags.append("pod_name:{0}".format(pod_name))
+        pod_labels = kube_labels.get(pod_name)
+        if pod_labels:
+            tags.extend(list(pod_labels))
+
+        if "-" in pod_name:
+            replication_controller = "-".join(pod_name.split("-")[:-1])
+            if "/" in replication_controller:
+                namespace, replication_controller = replication_controller.split("/", 1)
+                tags.append("kube_namespace:%s" % namespace)
+
+            tags.append("kube_replication_controller:%s" % replication_controller)
+
+        if self.publish_aliases and subcontainer.get("aliases"):
+            for alias in subcontainer['aliases'][1:]:
+                    # we don't add the first alias as it will be the container_name
+                    tags.append('container_alias:%s' % (self._shorten_name(alias)))
+
+        return tags
+
+
     def _update_container_metrics(self, instance, subcontainer, kube_labels):
         tags = instance.get('tags', [])  # add support for custom tags
 
@@ -169,35 +229,34 @@ class Kubernetes(AgentCheck):
 
         tags.append('container_name:%s' % container_name)
 
-        pod_name_set = False
+
         try:
-            for label_name, label in subcontainer['spec']['labels'].iteritems():
-                label_name = label_name.replace('io.kubernetes.pod.name', 'pod_name')
-                if label_name == "pod_name":
-                    pod_name_set = True
-                    pod_labels = kube_labels.get(label)
-                    if pod_labels:
-                        tags.extend(list(pod_labels))
-
-                    if "-" in label:
-                        replication_controller = "-".join(
-                            label.split("-")[:-1])
-                        if "/" in replication_controller:
-                            namespace, replication_controller = replication_controller.split("/", 1)
-                            tags.append("kube_namespace:%s" % namespace)
-
-                        tags.append("kube_replication_controller:%s" % replication_controller)
-                tags.append('%s:%s' % (label_name, label))
+            cont_labels = subcontainer['spec']['labels']
         except KeyError:
-            pass
+            self.log.debug("Subcontainer, doesn't have any labels")
+            cont_labels = {}
 
-        if not pod_name_set:
+        for label_name, label in cont_labels.iteritems():
+            if label_name in BLACKLISTED_LABELS:
+                self.log.debug("Skipping label: {0}={1}".format(label_name, label))
+                continue
+            tags.append('%s:%s' % (label_name, label))
+
+        # Collect pod names, namespaces, rc...
+
+        if "io.kubernetes.pod.namespace" in cont_labels and "io.kubernetes.pod.name" in cont_labels:
+            # Kubernetes >= 1.2
+            tags = self._get_post_1_2_tags(tags, cont_labels, subcontainer, kube_labels)
+
+        elif "io.kubernetes.pod.name" in cont_labels:
+            # Kubernetes <= 1.1
+            tags = self._get_pre_1_2_tags(tags, cont_labels, subcontainer, kube_labels)
+
+        else:
+            # Those are containers that are not part of a pod.
+            # They are top aggregate views and don't have the previous metadata.
             tags.append("pod_name:no_pod")
 
-        if self.publish_aliases and subcontainer.get("aliases"):
-            for alias in subcontainer['aliases'][1:]:
-                    # we don't add the first alias as it will be the container_name
-                    tags.append('container_alias:%s' % (self._shorten_name(alias)))
 
         stats = subcontainer['stats'][-1]  # take the latest
         self._publish_raw_metrics(NAMESPACE, stats, tags)
