@@ -428,7 +428,6 @@ class DockerDaemon(AgentCheck):
                 self._filtered_containers.add(container_name)
                 self.log.debug("Container {0} is filtered".format(container["Names"][0]))
 
-
     def _are_tags_filtered(self, tags):
         if self._tags_match_patterns(tags, self._exclude_patterns):
             if self._tags_match_patterns(tags, self._include_patterns):
@@ -461,7 +460,7 @@ class DockerDaemon(AgentCheck):
             if "SizeRw" in container:
 
                 m_func(self, 'docker.container.size_rw', container['SizeRw'],
-                    tags=tags)
+                       tags=tags)
             if "SizeRootFs" in container:
                 m_func(
                     self, 'docker.container.size_rootfs', container['SizeRootFs'],
@@ -651,24 +650,38 @@ class DockerDaemon(AgentCheck):
     def _report_disk_stats(self):
         """Report metrics about the volume space usage"""
         stats = {
-            'used': None,
-            'total': None,
-            'free': None
+            'docker.data.used': 0.0,
+            'docker.data.total': 0.0,
+            'docker.data.free': 0.0,
+            'docker.metadata.used': 0.0,
+            'docker.metadata.total': 0.0,
+            'docker.metadata.free': 0.0
+            # these two are calculated by _calc_percent_disk_stats
+            # 'docker.data.percent': 0.0,
+            # 'docker.metadata.percent': 0.0
         }
         info = self.docker_client.info()
         driver_status = info.get('DriverStatus', [])
         for metric in driver_status:
-            if metric[0] == 'Data Space Used':
-                stats['used'] = metric[1]
-            elif metric[0] == 'Data Space Total':
-                stats['total'] = metric[1]
-            elif metric[0] == 'Data Space Available':
-                stats['free'] = metric[1]
+            # only consider metrics about disk space
+            if len(metric) == 2 and 'Space' in metric[0]:
+                # identify Data and Metadata metrics
+                mtype = 'data'
+                if 'Metadata' in metric[0]:
+                    mtype = 'metadata'
+
+                if 'Used' in metric[0]:
+                    stats['docker.{0}.used'.format(mtype)] = metric[1]
+                elif 'Space Total' in metric[0]:
+                    stats['docker.{0}.total'.format(mtype)] = metric[1]
+                elif 'Space Available' in metric[0]:
+                    stats['docker.{0}.free'.format(mtype)] = metric[1]
         stats = self._format_disk_metrics(stats)
+        stats.update(self._calc_percent_disk_stats(stats))
         tags = self._get_tags()
         for name, val in stats.iteritems():
             if val:
-                self.gauge(DISK_METRICS_PREFIX.format(name), val, tags)
+                self.gauge(name, val, tags)
 
     def _format_disk_metrics(self, metrics):
         """Cast the disk stats to float and convert them to bytes"""
@@ -683,6 +696,24 @@ class DockerDaemon(AgentCheck):
                 except KeyError:
                     self.log.error('Unrecognized unit %s for disk metric %s. Dropping it.' % (unit, name))
         return metrics
+
+    def _calc_percent_disk_stats(self, stats):
+        """Calculate a percentage of used disk space for data and metadata"""
+        mtypes = ['data', 'metadata']
+        percs = {}
+        for mtype in mtypes:
+            used = stats.get('docker.{0}.used'.format(mtype))
+            total = stats.get('docker.{0}.total'.format(mtype))
+            free = stats.get('docker.{0}.free'.format(mtype))
+            if total < free + used:
+                self.log.error('used, free, and total disk metrics may be wrong, '
+                               'unable to calculate percentage.')
+                return {}
+            if used > 0.0 and total > 0.0:
+                percs['docker.{0}.percent'.format(mtype)] = round(100 * float(used) / float(total), 2)
+            elif free > 0.0 and total > 0.0:
+                percs['docker.{0}.percent'.format(mtype)] = round(100 * (1.0 - (float(free) / float(total))), 2)
+        return percs
 
     # Cgroups
 
